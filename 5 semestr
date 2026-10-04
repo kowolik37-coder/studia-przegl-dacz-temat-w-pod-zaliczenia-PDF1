@@ -1,0 +1,176 @@
+(async () => {
+  // 1. Konfiguracja parametrów
+  const startTopicInput = prompt("Od którego tematu chcesz zacząć? (Numer od 1 w górę):", "1");
+  if (startTopicInput === null) return;
+  let startTopicIndex = parseInt(startTopicInput) || 1;
+  if (startTopicIndex < 1) startTopicIndex = 1;
+
+  const waitMinInput = prompt("Ile MINUT trzymać otwarte okna dla każdego tematu?", "60");
+  if (waitMinInput === null) return;
+  let waitMinutes = parseFloat(waitMinInput) || 60;
+  if (waitMinutes < 1) waitMinutes = 1;
+
+  const WAIT_MS = Math.floor(waitMinutes * 60 * 1000);
+  const parser = new DOMParser();
+  let isRunning = true;
+  let openedWindows = [];
+
+  // 2. Interfejs z podglądem na żywo
+  const panel = document.createElement('div');
+  panel.style.cssText = `
+    position: fixed; top: 15px; left: 15px; z-index: 9999999;
+    background: rgba(10, 15, 25, 0.95); color: #00ffcc;
+    padding: 16px; border-radius: 12px; font-family: monospace;
+    font-size: 13px; box-shadow: 0 0 25px rgba(0,0,0,0.85);
+    border: 2px solid #00ffcc; min-width: 290px; line-height: 1.5;
+  `;
+  panel.innerHTML = `
+    <b style="font-size: 14px; color: #fff;">🚀 BATCH LESSON RUNNER (TANK + SCROLL)</b><br>
+    <div id="runner-info" style="margin-top: 8px;">Inicjalizacja...</div>
+    <div id="runner-timer" style="margin-top: 5px; color: #ffcc00; font-weight: bold;"></div>
+    <div id="runner-tank" style="margin-top: 3px; color: #00ff66; font-size: 11px;">🛡️ Tank + Micro-Scroll: Aktywny</div>
+    <button id="runner-stop" style="
+      width: 100%; margin-top: 12px; background: #e63946; color: #fff;
+      border: none; padding: 9px; border-radius: 6px; cursor: pointer; font-weight: bold; font-family: sans-serif;
+    ">ZATRZYMAJ I ZAMKNIJ OKNA</button>
+  `;
+  document.body.appendChild(panel);
+
+  const infoEl = panel.querySelector('#runner-info');
+  const timerEl = panel.querySelector('#runner-timer');
+
+  panel.querySelector('#runner-stop').onclick = () => {
+    isRunning = false;
+    openedWindows.forEach(w => {
+      try { if (w && !w.closed) w.close(); } catch(e){}
+    });
+    panel.innerHTML = '<b style="color: #e63946;">Skrypt zatrzymany. Zamknięto otwarte okna.</b>';
+    setTimeout(() => panel.remove(), 4000);
+  };
+
+  // 3. Pobranie listy tematów
+  const topicElements = Array.from(document.querySelectorAll('.course-topic__link'));
+  if (topicElements.length === 0) {
+    infoEl.innerHTML = '<span style="color:red;">❌ Nie znaleziono listy przedmiotów! Uruchom skrypt na stronie semestru.</span>';
+    return;
+  }
+
+  const topics = topicElements.map((el, i) => ({
+    order: i + 1,
+    title: el.innerText.trim(),
+    url: el.href.split('?')[0]
+  }));
+
+  // 4. Tank-Mode Keep-Alive + Losowe poruszanie stroną (co 12 sekund)
+  const tankInterval = setInterval(() => {
+    if (!isRunning) {
+      clearInterval(tankInterval);
+      return;
+    }
+    openedWindows.forEach(win => {
+      try {
+        if (win && !win.closed && win.document) {
+          // A. Wymuszenie focusu i obecności
+          win.dispatchEvent(new Event('focus'));
+
+          // B. Losowy mikro-scroll (od -90px do +90px)
+          const scrollOffset = Math.floor(Math.random() * 180) - 90;
+          win.scrollBy({ top: scrollOffset, behavior: 'smooth' });
+
+          // C. Ruch myszką po losowych koordynatach
+          if (win.document.body) {
+            const rndX = Math.floor(Math.random() * (win.innerWidth || 800));
+            const rndY = Math.floor(Math.random() * (win.innerHeight || 600));
+            win.document.body.dispatchEvent(new MouseEvent('mousemove', {
+              bubbles: true,
+              clientX: rndX,
+              clientY: rndY
+            }));
+          }
+
+          // D. Reset modala przerwania nauki (jeśli wyskoczył)
+          const modal = win.document.getElementById('isActiveModal');
+          if (modal && modal.style.display === 'block') {
+            const btn = modal.querySelector('.resume-button');
+            if (btn) btn.click();
+          }
+
+          // E. Kliknięcie w canvas lub przewijak PDF
+          const canvas = win.document.querySelector('.pdf-container canvas, .pdf-main-content');
+          if (canvas) {
+            canvas.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+          }
+        }
+      } catch (e) {
+        // Ignorujemy błędy specyficzne dla restrykcji iframe/okien
+      }
+    });
+  }, 12000);
+
+  // 5. Główna pętla przetwarzająca tematy
+  for (let t = startTopicIndex - 1; t < topics.length; t++) {
+    if (!isRunning) break;
+
+    const currentTopic = topics[t];
+    infoEl.innerHTML = `📁 <b>Temat [${currentTopic.order}/${topics.length}]:</b><br>${currentTopic.title}<br>⏳ Pobieranie listy lekcji...`;
+    timerEl.innerText = '';
+
+    try {
+      const res = await fetch(currentTopic.url, { credentials: 'include' });
+      const html = await res.text();
+      const doc = parser.parseFromString(html, 'text/html');
+
+      const lessonLinks = Array.from(doc.querySelectorAll('.course-lesson__link')).map(a => a.href.split('#')[0]);
+
+      if (lessonLinks.length === 0) {
+        infoEl.innerHTML = `⚠️ Brak lekcji w temacie ${currentTopic.order}. Pomijam...`;
+        await new Promise(r => setTimeout(r, 4000));
+        continue;
+      }
+
+      infoEl.innerHTML = `📁 <b>Temat [${currentTopic.order}/${topics.length}]:</b><br>${currentTopic.title}<br>🚀 Otwieranie ${lessonLinks.length} okien lekcji...`;
+
+      openedWindows = [];
+      for (let l = 0; l < lessonLinks.length; l++) {
+        if (!isRunning) break;
+        const w = window.open(lessonLinks[l], `_blank`, `width=950,height=680,left=${40 + l * 25},top=${40 + l * 25}`);
+        if (w) openedWindows.push(w);
+        await new Promise(r => setTimeout(r, 1500));
+      }
+
+      // Odliczanie czasu
+      let secondsLeft = WAIT_MS / 1000;
+      infoEl.innerHTML = `📁 <b>Temat [${currentTopic.order}/${topics.length}]:</b><br>${currentTopic.title}<br>🟢 Otwarte lekcje: ${openedWindows.length}`;
+
+      while (secondsLeft > 0 && isRunning) {
+        const m = Math.floor(secondsLeft / 60);
+        const s = secondsLeft % 60;
+        timerEl.innerText = `⏱ Do kolejnego tematu: ${m}m ${s < 10 ? '0' : ''}${s}s`;
+        await new Promise(r => setTimeout(r, 1000));
+        secondsLeft--;
+      }
+
+      // Zamykanie okien po skończonym czasie
+      openedWindows.forEach(w => {
+        try {
+          if (w && !w.closed) w.close();
+        } catch (e) {}
+      });
+      openedWindows = [];
+
+      if (!isRunning) break;
+
+    } catch (err) {
+      console.error(`Błąd w temacie ${currentTopic.order}:`, err);
+      infoEl.innerHTML = `<span style="color:red;">Błąd przy temacie ${currentTopic.order}. Przechodzę do następnego...</span>`;
+      await new Promise(r => setTimeout(r, 5000));
+    }
+  }
+
+  clearInterval(tankInterval);
+
+  if (isRunning) {
+    infoEl.innerHTML = '🎉 <b>Wszystkie wybrane tematy zostały pomyślnie przetworzone!</b>';
+    timerEl.innerText = '';
+  }
+})();

@@ -1,0 +1,232 @@
+(async () => {
+  const startTopicInput = prompt("Od którego TEMATU (przedmiotu) zacząć? (Numer od 1 w górę):", "1");
+  if (startTopicInput === null) return;
+  let startTopicIndex = parseInt(startTopicInput) || 1;
+  if (startTopicIndex < 1) startTopicIndex = 1;
+
+  const startLessonInput = prompt("Od której LEKCJI w wybranym temacie zacząć? (Numer od 1 w górę):", "1");
+  if (startLessonInput === null) return;
+  let startLessonIndex = parseInt(startLessonInput) || 1;
+  if (startLessonIndex < 1) startLessonIndex = 1;
+
+  const parser = new DOMParser();
+  let isRunning = true;
+  let currentChildWindow = null;
+
+  const panel = document.createElement('div');
+  panel.style.cssText = `
+    position: fixed; top: 15px; left: 15px; z-index: 9999999;
+    background: rgba(12, 18, 28, 0.95); color: #00e5ff;
+    padding: 16px; border-radius: 12px; font-family: monospace;
+    font-size: 13px; box-shadow: 0 0 25px rgba(0,0,0,0.85);
+    border: 2px solid #00e5ff; min-width: 320px; line-height: 1.5;
+  `;
+  panel.innerHTML = `
+    <b style="font-size: 14px; color: #fff;">🎬 VIDEO AUTOPILOT (KARTY + FORCE PLAY)</b><br>
+    <div id="v-info" style="margin-top: 8px;">Inicjalizacja...</div>
+    <div id="v-timer" style="margin-top: 5px; color: #ffeb3b; font-weight: bold;"></div>
+    <div id="v-status" style="margin-top: 4px; color: #69f0ae; font-size: 11px;">🛡️ Tank + Auto-Play: Aktywny</div>
+    <button id="v-stop" style="
+      width: 100%; margin-top: 12px; background: #ff5252; color: #fff;
+      border: none; padding: 9px; border-radius: 6px; cursor: pointer; font-weight: bold;
+    ">ZATRZYMAJ I ZAMKNIJ KARTĘ</button>
+  `;
+  document.body.appendChild(panel);
+
+  const infoEl = panel.querySelector('#v-info');
+  const timerEl = panel.querySelector('#v-timer');
+
+  panel.querySelector('#v-stop').onclick = () => {
+    isRunning = false;
+    if (currentChildWindow && !currentChildWindow.closed) {
+      currentChildWindow.close();
+    }
+    panel.innerHTML = '<b style="color: #ff5252;">Odtwarzacz zatrzymany.</b>';
+    setTimeout(() => panel.remove(), 4000);
+  };
+
+  const topicElements = Array.from(document.querySelectorAll('.course-topic__link'));
+  if (topicElements.length === 0) {
+    infoEl.innerHTML = '<span style="color:red;">❌ Nie znaleziono listy przedmiotów! Uruchom na stronie semestru.</span>';
+    return;
+  }
+
+  const topics = topicElements.map((el, i) => ({
+    order: i + 1,
+    title: el.innerText.trim(),
+    url: el.href.split('?')[0]
+  }));
+
+  function formatTime(sec) {
+    const h = Math.floor(sec / 3600);
+    const m = Math.floor((sec % 3600) / 60);
+    const s = Math.floor(sec % 60);
+    if (h > 0) return `${h}h ${m < 10 ? '0' : ''}${m}m ${s < 10 ? '0' : ''}${s}s`;
+    return `${m}m ${s < 10 ? '0' : ''}${s}s`;
+  }
+
+  function triggerVideoPlay(win) {
+    try {
+      const doc = win.document;
+      const vid = doc.querySelector('video');
+      if (!vid) return false;
+
+      const bigPlayBtn = doc.querySelector('.vjs-big-play-button') || doc.querySelector('.vjs-play-control');
+      if (bigPlayBtn) {
+        bigPlayBtn.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      }
+
+      if (win.videojs) {
+        const players = win.videojs.getPlayers ? win.videojs.getPlayers() : {};
+        for (let p in players) {
+          if (players[p] && typeof players[p].play === 'function') {
+            players[p].play();
+          }
+        }
+      }
+
+      const playPromise = vid.play();
+      if (playPromise !== undefined) {
+        playPromise.catch(() => {
+          vid.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        });
+      }
+
+      return !vid.paused;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  for (let t = startTopicIndex - 1; t < topics.length; t++) {
+    if (!isRunning) break;
+
+    const currentTopic = topics[t];
+    infoEl.innerHTML = `📁 <b>Przedmiot [${currentTopic.order}/${topics.length}]:</b><br>${currentTopic.title}<br>⏳ Pobieranie lekcji...`;
+    timerEl.innerText = '';
+
+    try {
+      const res = await fetch(currentTopic.url, { credentials: 'include' });
+      const html = await res.text();
+      const doc = parser.parseFromString(html, 'text/html');
+
+      const lessonLinks = Array.from(doc.querySelectorAll('.course-lesson__link')).map(a => a.href.split('#')[0]);
+
+      if (lessonLinks.length === 0) {
+        infoEl.innerHTML = `⚠️ Przedmiot ${currentTopic.order} nie ma lekcji. Pomijam...`;
+        await new Promise(r => setTimeout(r, 3000));
+        continue;
+      }
+
+      const lessonStartIndex = (t === startTopicIndex - 1) ? (startLessonIndex - 1) : 0;
+
+      for (let l = lessonStartIndex; l < lessonLinks.length; l++) {
+        if (!isRunning) break;
+
+        const lessonUrl = lessonLinks[l];
+        infoEl.innerHTML = `📁 <b>Przedmiot [${currentTopic.order}/${topics.length}]</b><br>▶ <b>Lekcja ${l + 1}/${lessonLinks.length}</b><br>Otwieram kartę...`;
+        timerEl.innerText = 'Ładowanie wideo...';
+
+        // Otwarcie w standardowej KARCIE zamiast okna popup
+        currentChildWindow = window.open(lessonUrl, '_blank');
+
+        let attempts = 0;
+        let videoFound = false;
+        let totalDuration = 75 * 60; 
+        let isEnded = false;
+
+        while (attempts < 25 && isRunning) {
+          await new Promise(r => setTimeout(r, 1000));
+          attempts++;
+          try {
+            if (currentChildWindow && currentChildWindow.document && currentChildWindow.document.readyState === 'complete') {
+              const video = currentChildWindow.document.querySelector('video');
+              if (video) {
+                videoFound = true;
+                
+                const dataDur = video.getAttribute('data-duration');
+                if (dataDur && !isNaN(parseInt(dataDur))) {
+                  totalDuration = parseInt(dataDur);
+                } else if (video.duration && !isNaN(video.duration)) {
+                  totalDuration = Math.ceil(video.duration);
+                }
+
+                triggerVideoPlay(currentChildWindow);
+                video.addEventListener('ended', () => { isEnded = true; });
+                break;
+              }
+            }
+          } catch (e) {}
+        }
+
+        if (!videoFound) {
+          infoEl.innerHTML += `<br><span style="color:yellow;">⚠️ Lekcja bez filmu (sam PDF). Czekam 12 min...</span>`;
+          totalDuration = 12 * 60;
+        }
+
+        let secondsRemaining = totalDuration;
+        infoEl.innerHTML = `📁 <b>Przedmiot [${currentTopic.order}/${topics.length}]</b><br>▶️ <b>Lekcja ${l + 1}/${lessonLinks.length}</b><br>🎥 Czas lekcji: ${formatTime(totalDuration)}`;
+
+        while (secondsRemaining > 0 && !isEnded && isRunning) {
+          if (!currentChildWindow || currentChildWindow.closed) {
+            console.log('Karta została zamknięta. Następna lekcja.');
+            break;
+          }
+
+          timerEl.innerText = `⏱ Pozostało: ${formatTime(secondsRemaining)}`;
+
+          try {
+            const win = currentChildWindow;
+            const doc = win.document;
+
+            if (secondsRemaining % 5 === 0) {
+              triggerVideoPlay(win);
+            }
+
+            if (secondsRemaining % 12 === 0) {
+              win.dispatchEvent(new Event('focus'));
+              const scrollY = Math.floor(Math.random() * 80) - 40;
+              win.scrollBy({ top: scrollY, behavior: 'smooth' });
+
+              if (doc.body) {
+                const rx = Math.floor(Math.random() * (win.innerWidth || 800));
+                const ry = Math.floor(Math.random() * (win.innerHeight || 600));
+                doc.body.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: rx, clientY: ry }));
+              }
+
+              const modal = doc.getElementById('isActiveModal');
+              if (modal && modal.style.display === 'block') {
+                const btn = modal.querySelector('.resume-button');
+                if (btn) btn.click();
+              }
+            }
+          } catch (e) {}
+
+          await new Promise(r => setTimeout(r, 1000));
+          secondsRemaining--;
+        }
+
+        try {
+          if (currentChildWindow && !currentChildWindow.closed) {
+            currentChildWindow.close();
+          }
+        } catch (e) {}
+        currentChildWindow = null;
+
+        await new Promise(r => setTimeout(r, 3000));
+      }
+
+      startLessonIndex = 1;
+
+    } catch (err) {
+      console.error(`Błąd w temacie ${currentTopic.order}:`, err);
+      infoEl.innerHTML = `<span style="color:red;">Błąd przy temacie ${currentTopic.order}. Przechodzę dalej...</span>`;
+      await new Promise(r => setTimeout(r, 4000));
+    }
+  }
+
+  if (isRunning) {
+    infoEl.innerHTML = '🎉 <b>Wszystkie filmy w semestrze zostały pomyślnie ukończone!</b>';
+    timerEl.innerText = '';
+  }
+})();

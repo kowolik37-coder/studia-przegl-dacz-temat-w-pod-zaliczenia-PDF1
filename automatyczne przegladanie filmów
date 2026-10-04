@@ -1,0 +1,219 @@
+(async () => {
+  // 1. Pytania wstępne o punkt startowy
+  const startTopicInput = prompt("Od którego TEMATU (przedmiotu) zacząć? (Numer od 1 w górę):", "1");
+  if (startTopicInput === null) return;
+  let startTopicIndex = parseInt(startTopicInput) || 1;
+  if (startTopicIndex < 1) startTopicIndex = 1;
+
+  const startLessonInput = prompt("Od której LEKCJI w wybranym temacie zacząć? (Numer od 1 w górę):", "1");
+  if (startLessonInput === null) return;
+  let startLessonIndex = parseInt(startLessonInput) || 1;
+  if (startLessonIndex < 1) startLessonIndex = 1;
+
+  const parser = new DOMParser();
+  let isRunning = true;
+  let currentChildWindow = null;
+
+  // 2. Pływający panel kontrolny
+  const panel = document.createElement('div');
+  panel.style.cssText = `
+    position: fixed; top: 15px; left: 15px; z-index: 9999999;
+    background: rgba(12, 18, 28, 0.95); color: #00e5ff;
+    padding: 16px; border-radius: 12px; font-family: monospace;
+    font-size: 13px; box-shadow: 0 0 25px rgba(0,0,0,0.85);
+    border: 2px solid #00e5ff; min-width: 320px; line-height: 1.5;
+  `;
+  panel.innerHTML = `
+    <b style="font-size: 14px; color: #fff;">🎬 VIDEO AUTOPILOT (SEKWENCYJNY)</b><br>
+    <div id="v-info" style="margin-top: 8px;">Inicjalizacja...</div>
+    <div id="v-timer" style="margin-top: 5px; color: #ffeb3b; font-weight: bold;"></div>
+    <div id="v-status" style="margin-top: 4px; color: #69f0ae; font-size: 11px;">🛡️ Tank + Emulacja uwagi: Aktywny</div>
+    <button id="v-stop" style="
+      width: 100%; margin-top: 12px; background: #ff5252; color: #fff;
+      border: none; padding: 9px; border-radius: 6px; cursor: pointer; font-weight: bold; font-family: sans-serif;
+    ">ZATRZYMAJ I ZAMKNIJ OKNO</button>
+  `;
+  document.body.appendChild(panel);
+
+  const infoEl = panel.querySelector('#v-info');
+  const timerEl = panel.querySelector('#v-timer');
+  const statusEl = panel.querySelector('#v-status');
+
+  panel.querySelector('#v-stop').onclick = () => {
+    isRunning = false;
+    if (currentChildWindow && !currentChildWindow.closed) {
+      currentChildWindow.close();
+    }
+    panel.innerHTML = '<b style="color: #ff5252;">Odtwarzacz zatrzymany.</b>';
+    setTimeout(() => panel.remove(), 4000);
+  };
+
+  // 3. Pobranie listy przedmiotów
+  const topicElements = Array.from(document.querySelectorAll('.course-topic__link'));
+  if (topicElements.length === 0) {
+    infoEl.innerHTML = '<span style="color:red;">❌ Nie znaleziono listy przedmiotów! Uruchom na stronie semestru.</span>';
+    return;
+  }
+
+  const topics = topicElements.map((el, i) => ({
+    order: i + 1,
+    title: el.innerText.trim(),
+    url: el.href.split('?')[0]
+  }));
+
+  // Pomocnicza funkcja formatowania sekund do mm:ss / hh:mm:ss
+  function formatTime(sec) {
+    const h = Math.floor(sec / 3600);
+    const m = Math.floor((sec % 3600) / 60);
+    const s = Math.floor(sec % 60);
+    if (h > 0) return `${h}h ${m < 10 ? '0' : ''}${m}m ${s < 10 ? '0' : ''}${s}s`;
+    return `${m}m ${s < 10 ? '0' : ''}${s}s`;
+  }
+
+  // 4. Pętla po tematach i lekcjach
+  for (let t = startTopicIndex - 1; t < topics.length; t++) {
+    if (!isRunning) break;
+
+    const currentTopic = topics[t];
+    infoEl.innerHTML = `📁 <b>Przedmiot [${currentTopic.order}/${topics.length}]:</b><br>${currentTopic.title}<br>⏳ Pobieranie lekcji...`;
+    timerEl.innerText = '';
+
+    try {
+      const res = await fetch(currentTopic.url, { credentials: 'include' });
+      const html = await res.text();
+      const doc = parser.parseFromString(html, 'text/html');
+
+      const lessonLinks = Array.from(doc.querySelectorAll('.course-lesson__link')).map(a => a.href.split('#')[0]);
+
+      if (lessonLinks.length === 0) {
+        infoEl.innerHTML = `⚠️ Przedmiot ${currentTopic.order} nie ma lekcji. Pomijam...`;
+        await new Promise(r => setTimeout(r, 3000));
+        continue;
+      }
+
+      // Jeśli jesteśmy w pierwszym wybranym temacie, uwzględniamy wybrany numer lekcji startowej
+      const lessonStartIndex = (t === startTopicIndex - 1) ? (startLessonIndex - 1) : 0;
+
+      for (let l = lessonStartIndex; l < lessonLinks.length; l++) {
+        if (!isRunning) break;
+
+        const lessonUrl = lessonLinks[l];
+        infoEl.innerHTML = `📁 <b>Przedmiot [${currentTopic.order}/${topics.length}]</b><br>▶️ <b>Lekcja ${l + 1}/${lessonLinks.length}</b><br>Otwieram okno z filmem...`;
+        timerEl.innerText = 'Ładowanie wideo...';
+
+        currentChildWindow = window.open(lessonUrl, '_blank', 'width=1100,height=750,left=80,top=80');
+
+        // Czekamy na załadowanie DOM w oknie potomnym
+        let attempts = 0;
+        let videoFound = false;
+        let totalDuration = 90 * 60; // 90 min domyślnie w razie braku tagu
+        let isEnded = false;
+
+        while (attempts < 20 && isRunning) {
+          await new Promise(r => setTimeout(r, 1000));
+          attempts++;
+          try {
+            if (currentChildWindow && currentChildWindow.document && currentChildWindow.document.readyState === 'complete') {
+              const video = currentChildWindow.document.querySelector('video');
+              if (video) {
+                videoFound = true;
+                // Odczyt z atrybutu platformy lub obiektu wideo
+                const dataDur = video.getAttribute('data-duration');
+                if (dataDur && !isNaN(parseInt(dataDur))) {
+                  totalDuration = parseInt(dataDur);
+                } else if (video.duration && !isNaN(video.duration)) {
+                  totalDuration = Math.ceil(video.duration);
+                }
+
+                // Autoplay
+                video.play().catch(() => {});
+                video.addEventListener('ended', () => { isEnded = true; });
+                break;
+              }
+            }
+          } catch (e) {
+            // Ignorujemy błędy przed załadowaniem
+          }
+        }
+
+        if (!videoFound) {
+          infoEl.innerHTML += `<br><span style="color:yellow;">⚠️ W lekcji brak filmu (sam PDF). Czekam bezpieczne 12 min...</span>`;
+          totalDuration = 12 * 60;
+        }
+
+        let secondsRemaining = totalDuration;
+        infoEl.innerHTML = `📁 <b>Przedmiot [${currentTopic.order}/${topics.length}]</b><br>▶️ <b>Lekcja ${l + 1}/${lessonLinks.length}</b><br>🎥 Długość materiału: ${formatTime(totalDuration)}`;
+
+        // Pętla odliczania i Tank-Mode dla aktywnego okna
+        while (secondsRemaining > 0 && !isEnded && isRunning) {
+          // Jeśli okno zostało zamknięte ręcznie przez użytkownika
+          if (!currentChildWindow || currentChildWindow.closed) {
+            console.log('Okno zostało zamknięte ręcznie. Przechodzę do następnej.');
+            break;
+          }
+
+          timerEl.innerText = `⏱ Pozostało: ${formatTime(secondsRemaining)}`;
+
+          // Podtrzymanie aktywności i losowy ruch co sekundę
+          try {
+            const win = currentChildWindow;
+            const doc = win.document;
+
+            // Upewnienie się, że wideo leci
+            const vid = doc.querySelector('video');
+            if (vid && vid.paused && !vid.ended) {
+              vid.play().catch(() => {});
+            }
+
+            // Co 10 sekund mikro-ruch kursora i przewijanie
+            if (secondsRemaining % 10 === 0) {
+              win.dispatchEvent(new Event('focus'));
+              const scrollY = Math.floor(Math.random() * 80) - 40;
+              win.scrollBy({ top: scrollY, behavior: 'smooth' });
+
+              if (doc.body) {
+                const rx = Math.floor(Math.random() * (win.innerWidth || 800));
+                const ry = Math.floor(Math.random() * (win.innerHeight || 600));
+                doc.body.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: rx, clientY: ry }));
+              }
+
+              // Zamknięcie modala przerwania jeśli wyskoczy
+              const modal = doc.getElementById('isActiveModal');
+              if (modal && modal.style.display === 'block') {
+                const btn = modal.querySelector('.resume-button');
+                if (btn) btn.click();
+              }
+            }
+          } catch (e) {}
+
+          await new Promise(r => setTimeout(r, 1000));
+          secondsRemaining--;
+        }
+
+        // Zamknięcie zakończonej lekcji
+        try {
+          if (currentChildWindow && !currentChildWindow.closed) {
+            currentChildWindow.close();
+          }
+        } catch (e) {}
+        currentChildWindow = null;
+
+        // Krótka pauza 3 sekundy przed otwarciem kolejnej
+        await new Promise(r => setTimeout(r, 3000));
+      }
+
+      // Reset lekcji startowej dla kolejnych przedmiotów
+      startLessonIndex = 1;
+
+    } catch (err) {
+      console.error(`Błąd w temacie ${currentTopic.order}:`, err);
+      infoEl.innerHTML = `<span style="color:red;">Błąd przy temacie ${currentTopic.order}. Przechodzę dalej...</span>`;
+      await new Promise(r => setTimeout(r, 4000));
+    }
+  }
+
+  if (isRunning) {
+    infoEl.innerHTML = '🎉 <b>Wszystkie filmy w semestrze zostały pomyślnie obejrzane!</b>';
+    timerEl.innerText = '';
+  }
+})();

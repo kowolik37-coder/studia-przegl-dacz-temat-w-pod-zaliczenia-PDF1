@@ -1,0 +1,125 @@
+(async () => {
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const parser = new DOMParser();
+
+  // Funkcja czyszcząca nazwy plików pod Windows / Linux / macOS
+  const sanitize = (text, maxLen = 60) => {
+    let clean = (text || '')
+      .trim()
+      .replace(/[\/\\?%*:|"<>]/g, '_')
+      .replace(/\s+/g, ' ');
+    return clean.length > maxLen ? clean.substring(0, maxLen - 3) + '...' : clean;
+  };
+
+  // 1. Dynamiczne pobieranie przedmiotów widocznych na koncie użytkownika
+  const subjectNodes = Array.from(document.querySelectorAll('.course-topic__link'));
+
+  if (subjectNodes.length === 0) {
+    console.error('❌ Nie znaleziono listy przedmiotów! Upewnij się, że jesteś w widoku semestru.');
+    return;
+  }
+
+  const subjects = subjectNodes.map((a, idx) => ({
+    index: idx + 1,
+    name: sanitize(a.innerText.trim(), 40),
+    url: a.href.split('?')[0]
+  }));
+
+  console.log(`🚀 [START] Wykryto ${subjects.length} przedmiotów w Twoim semestrze.`);
+  console.log('⏳ Pobieranie może potrwać kilka minut w zależności od liczby plików. Nie zamykaj karty!');
+
+  let totalDownloaded = 0;
+
+  for (const subject of subjects) {
+    console.log(`\n==================================================`);
+    console.log(`📚 [${subject.index}/${subjects.length}] Przedmiot: ${subject.name}`);
+    console.log(`==================================================`);
+
+    try {
+      // Pobieramy kod podstrony przedmiotu, by odczytać jego lekcje
+      const subRes = await fetch(subject.url, { credentials: 'include' });
+      const subHtml = await subRes.text();
+      const subDoc = parser.parseFromString(subHtml, 'text/html');
+
+      const lessonNodes = Array.from(subDoc.querySelectorAll('.course-lesson__link'));
+
+      if (lessonNodes.length === 0) {
+        console.warn(`⚠️ Brak lekcji w przedmiocie: ${subject.name}`);
+        continue;
+      }
+
+      const lessons = lessonNodes.map((a, idx) => {
+        let title = sanitize(a.innerText.trim(), 50);
+        if (!title.startsWith(`${idx + 1}`)) {
+          title = `${idx + 1}. ${title}`;
+        }
+        return {
+          title: title,
+          url: a.href.split('#')[0]
+        };
+      });
+
+      // Iteracja po lekcjach
+      for (let lIdx = 0; lIdx < lessons.length; lIdx++) {
+        const lesson = lessons[lIdx];
+        console.log(`  📂 [${lIdx + 1}/${lessons.length}] Lekcja: ${lesson.title}`);
+
+        try {
+          // Pobieramy treść konkretnej lekcji
+          const lRes = await fetch(lesson.url, { credentials: 'include' });
+          const lHtml = await lRes.text();
+          const lDoc = parser.parseFromString(lHtml, 'text/html');
+
+          // Szukamy WSZYSTKICH kontenerów PDF w lekcji
+          const pdfContainers = Array.from(lDoc.querySelectorAll('.pdf-container'));
+
+          if (pdfContainers.length === 0) {
+            continue; // Lekcja bez PDF (np. sam tekst/audio)
+          }
+
+          for (let pIdx = 0; pIdx < pdfContainers.length; pIdx++) {
+            const container = pdfContainers[pIdx];
+            const pdfUrl = container.getAttribute('data-url');
+            const matId = container.getAttribute('data-id') || `p_${pIdx + 1}`;
+
+            if (!pdfUrl) continue;
+
+            const part = pdfContainers.length > 1 ? `_czesc_${pIdx + 1}` : '';
+            const fileName = `${subject.index}. ${subject.name} - ${lesson.title}${part} [id_${matId}].pdf`;
+
+            // Pobranie pliku binarnego
+            const pdfRes = await fetch(pdfUrl, { credentials: 'include' });
+            if (!pdfRes.ok) throw new Error(`HTTP ${pdfRes.status}`);
+
+            const blob = await pdfRes.blob();
+            const blobUrl = URL.createObjectURL(blob);
+
+            // Wymuszenie zapisu na dysku
+            const a = document.createElement('a');
+            a.href = blobUrl;
+            a.download = fileName;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(blobUrl);
+
+            totalDownloaded++;
+            console.log(`    ✅ Pobrany [#${totalDownloaded}]: ${fileName}`);
+
+            await sleep(1500); // Odstęp między plikami z tej samej lekcji
+          }
+        } catch (errLesson) {
+          console.error(`    ❌ Błąd przy lekcji "${lesson.title}":`, errLesson);
+        }
+
+        await sleep(2000); // Odstęp między kolejnymi lekcjami
+      }
+    } catch (errSubject) {
+      console.error(`❌ Błąd przedmiotu "${subject.name}":`, errSubject);
+    }
+
+    await sleep(2500); // Odstęp przed wejściem w kolejny przedmiot
+  }
+
+  console.log(`\n🎉 Gotowe! Pobrano łącznie ${totalDownloaded} plików PDF z całego semestru.`);
+})();
